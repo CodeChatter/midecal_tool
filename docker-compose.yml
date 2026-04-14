@@ -1,0 +1,57 @@
+services:
+  medical-tool:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-python:3.11-slim}
+        INSTALL_GPU: ${INSTALL_GPU:-false}
+        PADDLE_GPU_VERSION: ${PADDLE_GPU_VERSION:-3.1.1}
+        PADDLE_CUDA_TAG: ${PADDLE_CUDA_TAG:-cu118}
+    container_name: medical-tool
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      # 部署层保留更早期兜底，应用层仍以 bootstrap_runtime() 为最终保障。
+      - FLAGS_enable_pir_api=0
+      - FLAGS_enable_pir_in_executor=0
+      - FLAGS_use_mkldnn=0
+      - DNNL_MAX_CPU_ISA=AVX2
+      - HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
+      - HF_HUB_ENDPOINT=${HF_HUB_ENDPOINT:-https://hf-mirror.com}
+      # PaddlePaddle 内存分配策略：naive_best_fit 更稳定，避免 Docker 下 SIGSEGV
+      - FLAGS_allocator_strategy=naive_best_fit
+      - FLAGS_fraction_of_gpu_memory_to_use=${FLAGS_fraction_of_gpu_memory_to_use:-0.6}
+      - PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=1
+      # 限制线程数，防止 Docker cgroup CPU 限制下 OpenMP/BLAS 创建过多线程导致 SIGSEGV
+      - OMP_NUM_THREADS=2
+      - OPENBLAS_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+      - FLAGS_num_threads=1
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      stack:
+        soft: 67108864
+        hard: 67108864
+    shm_size: ${DOCKER_SHM_SIZE:-2gb}
+    deploy:
+      resources:
+        limits:
+          cpus: "${DOCKER_CPUS:-4}"
+          memory: ${DOCKER_MEM:-16G}
+    volumes:
+      - paddlex_cache:/root/.paddlex
+      - paddleocr_cache:/root/.paddleocr
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  paddlex_cache:
+  paddleocr_cache:

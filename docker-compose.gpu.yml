@@ -1,0 +1,14 @@
+# GPU 覆盖配置 — 与 docker-compose.yml 配合使用
+# 用法: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+services:
+  medical-tool:
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
