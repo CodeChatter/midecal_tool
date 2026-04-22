@@ -19,6 +19,7 @@ import cv2
 import numpy as np
 
 from ...bootstrap.runtime import bootstrap_runtime
+from ..errors import SystemOverloadError
 from ..models import TextLine
 from ..registry import ocr_registry
 from .base import BaseOCREngine
@@ -29,6 +30,21 @@ logger = logging.getLogger(__name__)
 def _perf(msg: str):
     logger.info(msg)
     print(f"[PERF] {msg}", file=sys.stderr, flush=True)
+
+
+_OVERLOAD_MARKERS = (
+    'out of memory',
+    'resourceexhausted',
+    'cannot allocate',
+    'cublas_status',
+    'cudnn_status',
+)
+
+
+def _is_overload_error(message: str) -> bool:
+    m = (message or '').lower()
+    return any(marker in m for marker in _OVERLOAD_MARKERS)
+
 
 # ── 子进程 Worker 函数（模块级，可被 pickle）──
 
@@ -102,8 +118,12 @@ def _worker_run_ocr(ocr_instance, image_path: str):
 
     关键：优先使用 predict() API（PaddleX 管线），遇到问题会抛 Python 异常；
     ocr() API 在部分 Docker 环境 + v4 模型下会触发 C++ SIGSEGV，放在最后兜底。
+
+    API 兼容性异常（TypeError/AttributeError）触发兜底；
+    运行时异常（如显存 OOM）在所有路径都失败时抛出，由上层判定为 OCR 失败。
     """
     result = None
+    last_error: Optional[Exception] = None
 
     # 1) predict() — PaddleX 管线，异常可捕获
     try:
@@ -111,6 +131,7 @@ def _worker_run_ocr(ocr_instance, image_path: str):
     except (TypeError, AttributeError):
         pass
     except Exception as e:
+        last_error = e
         logging.getLogger(__name__).warning(f"predict() 失败: {e}")
 
     # 2) ocr(cls=True) — 旧版 API 兜底
@@ -120,10 +141,17 @@ def _worker_run_ocr(ocr_instance, image_path: str):
         except TypeError:
             try:
                 result = ocr_instance.ocr(image_path)
-            except Exception:
-                return None
-        except Exception:
-            return None
+            except Exception as e:
+                last_error = e
+                result = None
+        except Exception as e:
+            last_error = e
+            result = None
+
+    if result is None:
+        if last_error is not None:
+            raise RuntimeError(f"OCR 推理失败: {last_error}") from last_error
+        return None
 
     if not result or not result[0]:
         return None
@@ -170,6 +198,22 @@ def _worker_loop(req_queue, resp_queue, variant: str):
         resp_queue.put(('init_error', str(e)))
         return
 
+    import paddle
+    gpu_active = False
+    try:
+        gpu_active = (paddle.device.is_compiled_with_cuda()
+                      and not paddle.device.get_device().startswith('cpu'))
+    except Exception:
+        gpu_active = False
+
+    def _release_gpu_cache():
+        if not gpu_active:
+            return
+        try:
+            paddle.device.cuda.empty_cache()
+        except Exception as exc:
+            logging.getLogger(__name__).debug(f"empty_cache 失败: {exc}")
+
     resp_queue.put(('init_ok', None))
 
     while True:
@@ -190,12 +234,16 @@ def _worker_loop(req_queue, resp_queue, variant: str):
                 resp_queue.put(('ok', result))
             except Exception as e:
                 resp_queue.put(('error', str(e)))
+            finally:
+                _release_gpu_cache()
         elif cmd == 'warmup':
             try:
                 _worker_run_ocr(ocr_instance, payload)
                 resp_queue.put(('ok', None))
             except Exception as e:
                 resp_queue.put(('warmup_error', str(e)))
+            finally:
+                _release_gpu_cache()
 
 
 # ── 子进程管理器 ─────────────────────────────────────────
@@ -255,10 +303,14 @@ class _OCRWorkerManager:
                 logger.error("OCR 响应超时，重启子进程")
                 self._cleanup()
                 self._start_worker()
-                raise RuntimeError("OCR 推理超时")
+                raise SystemOverloadError("OCR 推理超时")
             if status == 'ok':
                 return payload
-            raise RuntimeError(f"OCR 子进程错误: {payload}")
+            detail = f"OCR 子进程错误: {payload}"
+            logger.error(detail)
+            if _is_overload_error(str(payload)):
+                raise SystemOverloadError(detail)
+            raise RuntimeError(detail)
 
     def warmup(self, image_path: str):
         with self._lock:
@@ -287,7 +339,7 @@ class _OCRWorkerManager:
 class PaddleOCREngine(BaseOCREngine):
     """封装 PaddleOCR，OCR 推理在子进程中执行以隔离 C++ 崩溃。"""
 
-    MAX_OCR_SIDE = 1280
+    MAX_OCR_SIDE = 960
 
     @staticmethod
     def _default_pool_size() -> int:

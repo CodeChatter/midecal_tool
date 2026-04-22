@@ -394,7 +394,7 @@ Content-Type: application/json
 | `image_url` | string | 是 | — | COS 上的图片 URL |
 | `llm_provider` | string | 否 | `null` | LLM 提供商；为空时使用 `DEFAULT_LLM_PROVIDER`，支持 `openai` / `claude` / `zhipu` / `bailian` / `volcengine` / `volcengine-lite` |
 | `mask_mode` | string | 否 | `"white"` | 打码方式：`white` / `black` / `gray` / `blur` / `mosaic` |
-| `categories` | string[] | 否 | 全部 8 类 | 指定检测的敏感信息类别 |
+| `categories` | string[] | 否 | 全部类别 | 指定检测的敏感信息类别 |
 
 **请求示例：**
 
@@ -437,7 +437,7 @@ Content-Type: application/json
 |------|------|------|--------|------|
 | `image_url` | string | 是 | — | COS 上的图片 URL |
 | `llm_provider` | string | 否 | `null` | LLM 提供商；为空时使用 `DEFAULT_LLM_PROVIDER`，支持 `openai` / `claude` / `zhipu` / `bailian` / `volcengine` / `volcengine-lite` |
-| `categories` | string[] | 否 | 全部 8 类 | 指定检测的敏感信息类别 |
+| `categories` | string[] | 否 | 全部类别 | 指定检测的敏感信息类别 |
 
 **请求示例：**
 
@@ -478,8 +478,10 @@ Content-Type: application/json
 | 病历编号 | `medical_id` | 病历号/就诊号/住院号/超声号等 |
 | 年龄 | `age` | 年龄数值（如 "33岁"） |
 | 出生日期 | `date_of_birth` | 出生日期 |
-| 医院名称 | `hospital` | 如 "XX市人民医院" |
+| 日期 | `date` | 所有日期格式内容（检查日期、报告日期、入院日期等） |
+| 医院名称 | `hospital` | 如 "XX市人民医院"，含分院、院区、单据顶部医院标题 |
 | 医生姓名 | `doctor` | 报告医生、主治医生、审核医生等 |
+| 人像 | `portrait` | 图片中可见的真人人像（证件照、头像等），通过 CV 自动识别 |
 
 ## 打码方式
 

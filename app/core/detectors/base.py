@@ -26,11 +26,13 @@ def _perf(msg: str):
 
 DEFAULT_CATEGORIES = [
     "name", "id_card", "phone", "medical_id", "doctor",
-    "email", "address",
+    "email", "address", "hospital", "portrait",
 ]
 
 CATEGORY_DESCRIPTIONS = {
-    "name": "患者/就诊人真实姓名（大部分2-4个汉字，少数民族会更长一些）",
+    "name": ("所有真实姓名中的非医务人员姓名，包括患者、就诊人、受检者、家属、联系人、"
+             "采样人、送检人、录入人等；如“姓名：”“患者姓名：”“受检者：”等字段中的"
+             "实际姓名值（只返回姓名，不返回标签）。医务人员姓名请归类为 doctor"),
     "id_card": "身份证号码（15或18位数字）",
     "phone": "手机或固定电话号码",
     "medical_id": "病历号/就诊号/住院号/超声号/门诊号/检查号等各类编号",
@@ -38,10 +40,14 @@ CATEGORY_DESCRIPTIONS = {
     "address": "家庭住址/居住地址/户籍地址/通讯地址等个人地址信息",
     "age": '年龄数值（如"33岁"）',
     "date_of_birth": "出生日期",
-    "hospital": "医院全称或简称（包括附属医院、分院、诊所等机构名称）",
-    "doctor": ("所有出现在医疗单据上的医生真实姓名，包括：\n"
-               "                   申请医生、报告医生、审核医师、检查医生、主治医师、经治医生、\n"
-               "                   操作者、技师、签名医生等所有医务人员姓名"),
+    "date": ("所有日期格式的内容，包括检查日期、报告日期、打印日期、入院日期、出院日期、"
+             "手术日期等，常见格式如 2026-01-18、2026/01/18、2026.01.18、2026年1月18日"),
+    "hospital": ("医院全称或简称，包括附属医院、分院、院区、诊所等机构名称；"
+                 "单据顶部医院标题也属于 hospital，如“无锡市第二人民医院南院”"),
+    "doctor": ("所有出现在医疗单据上的医生/医务人员真实姓名，包括申请医生、报告医生、"
+               "审核医师、检查医生、主治医师、经治医生、操作者、技师、签名医生等"),
+    "portrait": ("图片中可见的真人人像照片区域，包括证件照、头像、脸部特写、半身照等；"
+                 "仅限真实人像，不含卡通、插画、解剖示意图、医学影像（如 CT/X 光/B 超）"),
 }
 
 # ============================================================
@@ -60,8 +66,23 @@ _PROMPT_HEADER = """你是医疗文档隐私脱敏专家。
 - 图片中可能有多张文档叠放在一起，你必须逐一检查每一张可见文档
 - 严格对照图片内容，不要虚构 OCR 中不存在的文本
 - 宁可多标不可漏标
+- 所有真实姓名都属于敏感信息，不能遗漏
+- `name` 类包括所有非医务人员姓名，如“姓名 / 患者姓名 / 受检者 / 就诊人 / 联系人 / 家属 / 采样人 / 送检人”等字段后的实际姓名值
+- `doctor` 类包括所有医生/医务人员姓名，如“申请医生 / 报告医生 / 审核医师 / 检查医生 / 主治医师 / 经治医生 / 操作者 / 技师”等字段后的实际姓名值
+- 医生、医师、技师、检查者、审核者等医务人员姓名必须归类为 `doctor`，不要归到 `name`
+- `hospital` 类包括医院全称、简称、院区、分院名称，以及单据顶部医院标题
+- 当请求包含 `date` 类时，所有日期格式的内容都属于敏感信息，包括检查日期、报告日期、打印日期、入院日期、出院日期、手术日期等
 - ⚠️ 重要：只标注字段的【值】，绝对不要标注字段的【标签/名称】！
   例如 "姓名：张三" → 只标注 "张三"，不要标注 "姓名："
+  例如 "患者姓名：张三" → 只标注 "张三"，category 必须是 "name"
+  例如 "受检者：张三" → 只标注 "张三"，category 必须是 "name"
+  例如 "联系人：张三" → 只标注 "张三"，category 必须是 "name"
+  例如 "采样人：张三" → 只标注 "张三"，category 必须是 "name"
+  例如 "报告医生：李四" → 只标注 "李四"，category 必须是 "doctor"
+  例如 单据顶部标题 "无锡市第二人民医院南院" → 整行属于医院名称，category 必须是 "hospital"
+  例如 "医院名称：无锡市第二人民医院南院" → 只标注 "无锡市第二人民医院南院"，category 必须是 "hospital"
+  例如 "检查日期：2026.01.18" → 只标注 "2026.01.18"，category 必须是 "date"
+  例如 "报告日期：2026年1月18日" → 只标注 "2026年1月18日"，category 必须是 "date"
   例如 "病理号：C2400286" → 只标注 "C2400286"，不要标注 "病理号："
   如果标签后面没有值（被涂抹/遮挡/空白），则该字段不需要标注任何内容
 
@@ -74,10 +95,12 @@ _PROMPT_FOOTER = """
 
 【绝对不要标注】：
 - 科室名称、报告类型
+- 报告标题或栏位标题（如"MR检查报告单"、"报告描述"、"报告诊断"）
 - 医生职称（如"主任医师"，只标注姓名部分）
 - 诊断结论、病情描述、检查结果
+- 检查项目或检查部位（如"MRI眼眶平扫"）
 - 性别（男/女）
-- 日期（除出生日期外）
+__DATE_EXCLUSION__
 - ⚠️ 标签文字本身（如"姓名："、"病理号："、"住院号："、"送检科室："、"报告医生："等标签绝对不要标注，只标注标签冒号后面的实际值）
 - 职称（主任医师、副主任医师等）
 - 标签后没有实际内容的字段（如"见习医生："后面没有姓名、"姓名"后面是空白/横线/被涂抹遮挡，则该字段完全不标注）
@@ -110,7 +133,14 @@ def build_system_prompt(categories: Optional[List[str]] = None) -> str:
         desc = CATEGORY_DESCRIPTIONS.get(cat, cat)
         lines.append(f"{i}. {cat:15s} - {desc}")
 
-    return _PROMPT_HEADER + "\n".join(lines) + _PROMPT_FOOTER
+    date_exclusion = (
+        ""
+        if "date" in categories
+        else "- 日期（除出生日期外）"
+    )
+
+    footer = _PROMPT_FOOTER.replace("__DATE_EXCLUSION__", date_exclusion)
+    return _PROMPT_HEADER + "\n".join(lines) + footer
 
 
 VISION_USER_PROMPT = """OCR 文本行：
@@ -431,6 +461,11 @@ class BaseDetector(ABC):
         cv_regions = self._detect_signature_cv(image_path, text_lines)
         cv_ms = (time.time() - cv_started_at) * 1000
 
+        # CV 人脸检测 → portrait regions（不依赖 LLM bbox，始终执行）
+        face_started_at = time.time()
+        face_regions = self._detect_faces_cv(image_path)
+        face_ms = (time.time() - face_started_at) * 1000
+
         # CV 检测医生名字附近的手写签名
         doctor_regions = [
             r for r in (llm_regions + rule_regions)
@@ -444,17 +479,19 @@ class BaseDetector(ABC):
 
         dedup_started_at = time.time()
         all_regions = self._deduplicate(
-            llm_regions + rule_regions + cv_regions + adj_regions
+            llm_regions + rule_regions + cv_regions + adj_regions + face_regions
         )
         dedup_ms = (time.time() - dedup_started_at) * 1000
-        extra = len(rule_regions) + len(cv_regions) + len(adj_regions)
         _perf(
-            "Vision 后处理完成: llm=%s, rule=%s, cv=%s, adj=%s, final=%s, rule_ms=%.1f, cv_ms=%.1f, adj_ms=%.1f, dedup_ms=%.1f"
+            "Vision 后处理完成: llm=%s, rule=%s, cv=%s, adj=%s, face=%s, final=%s, "
+            "rule_ms=%.1f, cv_ms=%.1f, adj_ms=%.1f, face_ms=%.1f, dedup_ms=%.1f"
             % (
-                len(llm_regions), len(rule_regions), len(cv_regions), len(adj_regions), len(all_regions),
-                rule_ms, cv_ms, adj_ms, dedup_ms,
+                len(llm_regions), len(rule_regions), len(cv_regions),
+                len(adj_regions), len(face_regions), len(all_regions),
+                rule_ms, cv_ms, adj_ms, face_ms, dedup_ms,
             )
         )
+        extra = len(rule_regions) + len(cv_regions) + len(adj_regions) + len(face_regions)
         if extra:
             logger.info(f"规则+CV 补充 {extra} 处，合并后共 {len(all_regions)} 处")
         return all_regions
@@ -597,6 +634,53 @@ class BaseDetector(ABC):
                 f"填充率={fill_ratio:.1%}, 笔画数={len(stroke_candidates)}"
             )
 
+        return regions
+
+    def _detect_faces_cv(self, image_path: str) -> List[SensitiveRegion]:
+        """CV 人脸检测 → portrait 类 SensitiveRegion。
+
+        不依赖 LLM 结果，始终对整图运行；空列表表示未检测到人像。
+        """
+        import cv2
+        try:
+            from ..face_detector import FaceDetector
+        except Exception as e:
+            logger.warning(f"人脸检测器加载失败: {e}")
+            return []
+
+        image = cv2.imread(image_path)
+        if image is None:
+            return []
+
+        detector = FaceDetector()
+        faces = detector.detect(image)
+        if not faces:
+            return []
+
+        h, w = image.shape[:2]
+        regions: List[SensitiveRegion] = []
+        for (x1, y1, x2, y2) in faces:
+            # 适度外扩，覆盖头发/帽子/颈部，保证隐私
+            pad_w = int((x2 - x1) * 0.20)
+            pad_h = int((y2 - y1) * 0.30)
+            ex1 = max(0, x1 - pad_w)
+            ey1 = max(0, y1 - pad_h)
+            ex2 = min(w, x2 + pad_w)
+            ey2 = min(h, y2 + pad_h)
+            polygon = np.array(
+                [[ex1, ey1], [ex2, ey1], [ex2, ey2], [ex1, ey2]],
+                dtype=np.int32,
+            )
+            regions.append(SensitiveRegion(
+                text='[人像]',
+                category='portrait',
+                polygon=polygon,
+                ocr_line_index=-1,
+            ))
+            logger.info(
+                f"CV 检测到人像: bbox=({ex1},{ey1},{ex2},{ey2}) "
+                f"backend={detector.backend}"
+            )
         return regions
 
     # 签名上下文关键词：OCR 文本中出现时可降低 CV 检测阈值

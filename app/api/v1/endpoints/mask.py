@@ -11,6 +11,7 @@ from fastapi import APIRouter
 from ....core.registry import masking_registry
 from ....core import cos
 from ....core.cos import CosLocation
+from ....core.errors import SystemOverloadError
 from ....schemas import MaskRequest, MaskResponse
 from ....utils.image import validate_image_ext, validate_image_content
 from ..deps import get_masker, get_semaphore, run_in_thread
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 def _mask_sync(loc, req):
     """同步打码逻辑，在线程池中执行。"""
     import sys
+
     def _log(msg):
         logger.info(msg)
         print(f"[MASK] {msg}", file=sys.stderr, flush=True)
@@ -44,6 +46,7 @@ def _mask_sync(loc, req):
             _log(f"文件格式校验失败: {e}")
             return MaskResponse(success=False, origin_url=req.image_url, error=str(e))
         except Exception as e:
+            logger.exception("图片下载失败")
             _log(f"图片下载失败: {e}")
             return MaskResponse(success=False, origin_url=req.image_url, error=f"图片下载失败: {e}")
 
@@ -58,9 +61,22 @@ def _mask_sync(loc, req):
             output_exists = os.path.exists(output_path)
             output_size_kb = os.path.getsize(output_path) // 1024 if output_exists else 0
             _log(f"[STEP 2/3] 脱敏处理完成，耗时 {process_ms/1000:.1f}s，输出大小 {output_size_kb}KB")
+        except SystemOverloadError as e:
+            logger.exception("脱敏处理失败（系统资源不足）")
+            _log(f"脱敏处理失败（系统资源不足）: {e}")
+            return MaskResponse(
+                success=False,
+                origin_url=req.image_url,
+                error="当前系统压力过大，请稍后重试",
+            )
         except Exception as e:
+            logger.exception("脱敏处理失败")
             _log(f"脱敏处理失败: {e}")
-            return MaskResponse(success=False, origin_url=req.image_url, error=f"脱敏处理失败: {e}")
+            return MaskResponse(
+                success=False,
+                origin_url=req.image_url,
+                error="脱敏处理失败，请稍后重试",
+            )
 
         if not os.path.exists(output_path):
             output_path = input_path
@@ -76,6 +92,7 @@ def _mask_sync(loc, req):
             upload_size_kb = os.path.getsize(output_path) // 1024 if os.path.exists(output_path) else 0
             _log(f"[STEP 3/3] 上传完成，耗时 {upload_ms/1000:.1f}s，上传大小 {upload_size_kb}KB")
         except Exception as e:
+            logger.exception("上传打码图片失败")
             _log(f"上传打码图片失败: {e}")
             return MaskResponse(success=False, origin_url=req.image_url, error=f"上传打码图片失败: {e}")
 
@@ -94,8 +111,9 @@ def _mask_sync(loc, req):
 @router.post("/mask", response_model=MaskResponse)
 async def mask_image(req: MaskRequest):
     """接收 COS 图片 URL，备份原图、打码、回传，返回 JSON。"""
-    logger.info("收到 /api/mask 请求参数: %s", req.model_dump())
+    logger.info("[MASK] 收到 /api/mask 请求参数: %s", req.model_dump())
     if req.mask_mode not in masking_registry.available():
+        logger.warning("[MASK] 无效的 mask_mode: %s", req.mask_mode)
         return MaskResponse(
             success=False,
             origin_url=req.image_url,
@@ -106,13 +124,35 @@ async def mask_image(req: MaskRequest):
     try:
         validate_image_ext(req.image_url)
     except ValueError as e:
+        logger.warning("[MASK] 图片扩展名校验失败: %s", e)
         return MaskResponse(success=False, origin_url=req.image_url, error=str(e))
 
     # 解析 URL 得到 bucket / region / key
     try:
         loc = cos.parse_url(req.image_url)
     except ValueError as e:
+        logger.warning("[MASK] 图片 URL 解析失败: %s", e)
         return MaskResponse(success=False, origin_url=req.image_url, error=str(e))
 
     async with get_semaphore():
-        return await run_in_thread(_mask_sync, loc, req)
+        logger.info(
+            "[MASK] 请求进入线程池: bucket=%s, key=%s, provider=%s, mode=%s, categories=%s",
+            loc.bucket,
+            loc.key,
+            req.llm_provider,
+            req.mask_mode,
+            req.categories,
+        )
+        try:
+            resp = await run_in_thread(_mask_sync, loc, req)
+        except Exception:
+            logger.exception("[MASK] 线程池执行失败")
+            raise
+
+        logger.info(
+            "[MASK] 请求处理完成: success=%s, masked_url=%s, error=%s",
+            resp.success,
+            resp.masked_url,
+            resp.error,
+        )
+        return resp
